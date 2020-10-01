@@ -38,9 +38,12 @@ ns-3 TCP
 
 In brief, the native |ns3| TCP model supports a full bidirectional TCP with
 connection setup and close logic.  Several congestion control algorithms
-are supported, with NewReno the default, and Westwood, Hybla, and HighSpeed
-also supported.  Multipath-TCP and TCP Selective Acknowledgements (SACK)
-are not yet supported in the |ns3| releases.
+are supported, with NewReno the default, and Westwood, Hybla, HighSpeed,
+Vegas, Scalable, Veno, Binary Increase Congestion Control (BIC), Yet Another
+HighSpeed TCP (YeAH), Illinois, H-TCP, Low Extra Delay Background Transport
+(LEDBAT), Data Center TCP (DCTCP) also supported. The model also supports 
+Selective Acknowledgements (SACK). Multipath-TCP is not yet supported in the 
+|ns3| releases.
 
 Model history
 +++++++++++++
@@ -669,6 +672,272 @@ More information (paper):  http://www.hamilton.ie/net/htcp3.pdf
 
 More information (Internet Draft):  https://tools.ietf.org/html/draft-leith-tcp-htcp-06
 
+LEDBAT
+^^^^^^
+
+Low Extra Delay Background Transport (LEDBAT) is an experimental delay-based 
+congestion control algorithm that seeks to utilize the available bandwidth on
+an end-to-end path while limiting the consequent increase in queueing delay 
+on that path. LEDBAT uses changes in one-way delay measurements to limit 
+congestion that the flow itself induces in the network.
+
+As a first approximation, the LEDBAT sender operates as shown below:
+
+on receipt of an ACK:
+
+.. math::
+       currentdelay = acknowledgement.delay
+       basedelay = min (basedelay, currentdelay)
+       queuingdelay = currentdelay - basedelay
+       offtarget = (TARGET - queuingdelay) / TARGET
+       cWnd += GAIN * offtarget * bytesnewlyacked * MSS / cWnd
+
+``TARGET`` is the maximum queueing delay that LEDBAT itself may introduce in the
+network, and ``GAIN`` determines the rate at which the cwnd responds to changes in 
+queueing delay;  ``offtarget`` is a normalized value representing the difference between
+the measured current queueing delay and the predetermined TARGET delay. offtarget can 
+be positive or negative; consequently, cwnd increases or decreases in proportion to 
+offtarget.
+
+Following the recommendation of RFC 6817, the default values of the parameters are:
+
+* TargetDelay = 100
+* baseHistoryLen = 10
+* noiseFilterLen = 4
+* Gain = 1
+
+To enable LEDBAT on all TCP sockets, the following configuration can be used:
+
+::
+
+  Config::SetDefault ("ns3::TcpL4Protocol::SocketType", TypeIdValue (TcpLedbat::GetTypeId ()));
+
+To enable LEDBAT on a chosen TCP socket, the following configuration can be used:
+
+::
+
+  Config::Set ("$ns3::NodeListPriv/NodeList/1/$ns3::TcpL4Protocol/SocketType", TypeIdValue (TcpLedbat::GetTypeId ()));
+
+The following unit tests have been written to validate the implementation of LEDBAT:
+
+* LEDBAT should operate same as NewReno during slow start
+* LEDBAT should operate same as NewReno if timestamps are disabled
+* Test to validate cwnd increment in LEDBAT
+* Test to validate cwnd decrement in LEDBAT
+
+In comparison to RFC 6817, the scope and limitations of the current LEDBAT
+implementation are:
+
+* It assumes that the clocks on the sender side and receiver side are synchronised
+* In line with Linux implementation, the one-way delay is calculated at the sender side by using the timestamps option in TCP header
+* Only the MIN function is used for noise filtering 
+
+More information about LEDBAT is available in RFC 6817: https://tools.ietf.org/html/rfc6817
+
+Data Center TCP (DCTCP)
+^^^^^^^^^^^^^^^^^^^^^^^^
+ 
+DCTCP is an enhancement to the TCP congestion control algorithm for data center 
+networks and leverages Explicit Congestion Notification (ECN) to provide multi-bit 
+feedback to the end hosts. DCTCP extends the Explicit Congestion Notification 
+to estimate the fraction of bytes that encounter congestion, rather than simply 
+detecting that the congestion has occurred. DCTCP then scales the congestion 
+window based on this estimate. This approach achieves high burst tolerance, low 
+latency, and high throughput with shallow-buffered switches. 
+ 
+* Receiver functionality: If CE is set in IP header of incoming packet, send congestion notification to the sender by setting ECE in TCP header.
+
+* Sender functionality: It should maintain an average of fraction of packets marked (α) by using the exponential weighted moving average as shown below:
+
+               α = (1 - g) x α + g x F
+
+where 
+* g is the estimation gain (between 0 and 1) 
+* F is fraction of packets marked in current RTT.
+ 
+On receipt of an ACK with ECE bit set, the sender should respond by reducing the congestion
+window as follows, once for every window of data:
+
+               cwnd = cwnd * (1 - α / 2)
+ 
+Following the recommendation of IETF of DCTCP, the default values of the parameters are:
+ 
+* g = 0.0625
+* alpha = 0
+ 
+To enable DCTCP on all TCP sockets, the following configuration can be used:
+ 
+::
+
+  Config::SetDefault ("ns3::TcpL4Protocol::SocketType", TypeIdValue (TcpDctcp::GetTypeId ()));
+ 
+To enable DCTCP on a chosen TCP socket, the following configuration can be used:
+ 
+::
+ 
+  Config::Set ("$ns3::NodeListPriv/NodeList/1/$ns3::TcpL4Protocol/SocketType", TypeIdValue (TcpDctcp::GetTypeId ()));
+ 
+The following unit tests have been written to validate the implementation of DCTCP:
+ 
+* ECT flags should be set for SYN, SYN+ACK, ACK and data packets for DCTCP traffic
+* ECT flags should not be set for SYN, SYN+ACK and pure ACK packets, but should be set on data packets for ECN enabled traditional TCP flows
+* ECE should be set only when CE flags are received at receiver and even if sender doesn’t send CWR, receiver should not send ECE if it doesn’t receive packets with CE flags
+* Test to validate cwnd increment in DCTCP
+* Test to validate cwnd decrement in DCTCP
+ 
+Limitations of DCTCP implementation: DCTCP depends on a simple queue management
+algorithm in routers / switches to mark packets. The current implementation of
+DCTCP in ns-3 uses RED with a simple configuration to achieve the behavior of
+desired queue management algorithm. The same can also be achieved by using a
+PfifoFast, but it does not support ECN marking yet.
+ 
+More information about DCTCP is available in the following Internet draft:
+https://tools.ietf.org/html/draft-ietf-tcpm-dctcp-07
+
+
+Support for Explicit Congestion Notification (ECN)
+++++++++++++++++++++++++++++++++++++++++++++++++++
+
+ECN provides end-to-end notification of network congestion without dropping
+packets. It uses two bits in the IP header: ECN Capable Transport (ECT bit)
+and Congestion Experienced (CE bit), and two bits in the TCP header: Congestion
+Window Reduced (CWR) and ECN Echo (ECE). 
+
+More information is available in RFC 3168: https://tools.ietf.org/html/rfc3168
+
+The following ECN states are declared in ``src/internet/model/tcp-socket.h``
+
+::
+
+  typedef enum
+    {
+      ECN_DISABLED = 0, //!< ECN disabled traffic 
+      ECN_IDLE,         //!< ECN is enabled but currently there is no action pertaining to ECE or CWR to be taken 
+      ECN_CE_RCVD,      //!< This state indicates that the receiver has received a packet with CE bit set in IP header 
+      ECN_ECE_SENT,     //!< This state indicates that the receiver has sent an ACK with ECE bit set in TCP header
+      ECN_ECE_RCVD,     //!< This state indicates that the sender has received an ACK with ECE bit set in TCP header 
+      ECN_CWR_SENT      //!< This state indicates that the sender has reduced the congestion window, and sent a packet
+                             with CWR bit set in TCP header
+    } EcnStates_t;
+
+The following are some important ECN parameters
+
+::
+
+  // ECN parameters
+  bool                     m_ecn;             //!< Socket ECN capability
+  TracedValue<EcnStates_t> m_ecnState;        //!< Current ECN State, represented as combination of EcnState values
+  TracedValue<SequenceNumber32> m_ecnEchoSeq; //< Sequence number of the last received   ECN Echo
+
+Enabling ECN
+^^^^^^^^^^^^
+
+By default, support for ECN is disabled in TCP sockets.  To enable, change
+the value of the attribute ``ns3::TcpSocketBase::UseEcn`` from false to true.
+
+ECN negotiation
+^^^^^^^^^^^^^^^
+
+ECN capability is negotiated during the three-way TCP handshake:
+
+1. Sender sends SYN + CWR + ECE
+
+::
+
+    if (m_ecn)
+      { 
+        SendEmptyPacket (TcpHeader::SYN | TcpHeader::ECE | TcpHeader::CWR);
+      }
+    else
+      {
+        SendEmptyPacket (TcpHeader::SYN);
+      }
+    m_ecnState = ECN_DISABLED;
+
+2. Receiver sends SYN + ACK + ECE
+
+::
+
+    if (m_ecn && (tcpHeader.GetFlags () & (TcpHeader::CWR | TcpHeader::ECE)) == (TcpHeader::CWR | TcpHeader::ECE))
+      {
+        SendEmptyPacket (TcpHeader::SYN | TcpHeader::ACK |TcpHeader::ECE);
+        m_ecnState = ECN_IDLE;
+      }
+    else
+      {
+        SendEmptyPacket (TcpHeader::SYN | TcpHeader::ACK);
+        m_ecnState = ECN_DISABLED;
+      }
+
+3. Sender sends ACK
+
+::
+
+    if (m_ecn &&  (tcpHeader.GetFlags () & (TcpHeader::CWR | TcpHeader::ECE)) == (TcpHeader::ECE))
+      {
+        m_ecnState = ECN_IDLE;
+      }
+    else
+      {
+        m_ecnState = ECN_DISABLED;
+      }
+
+Once the ECN-negotiation is successful, the sender sends data packets with ECT
+bits set in the IP header.
+
+Note: As mentioned in Section 6.1.1 of RFC 3168, ECT bits should not be set
+during ECN negotiation. The ECN negotiation implemented in |ns3| follows 
+this guideline.
+
+ECN State Transitions
+^^^^^^^^^^^^^^^^^^^^^
+
+1. Initially both sender and receiver have their m_ecnState set as ECN_DISABLED
+2. Once the ECN negotiation is successful, their states are set to ECN_IDLE 
+3. Upon receipt of a packet with CE bits set in IP header, the
+   receiver changes its state to ECN_CE_RCVD
+4. When the receiver sends an ACK with ECE bit set, its state is set as 
+   ECN_ECE_SENT
+5. When the sender receives an ACK with ECE bit set from receiver, its state 
+   is set as ECN_ECE_RCVD
+6. When the sender sends the packet with CWR bit set, its state is set as 
+   ECN_CWR_SENT
+7. When the receiver receives the packet with CWR bit set, its state is set 
+   as ECN_IDLE
+
+RFC 3168 compliance
+^^^^^^^^^^^^^^^^^^^
+
+Based on the suggestions provided in RFC 3168, the following behavior has
+been implemented:
+
+1. Pure ACK packets should not have the ECT bit set (Section 6.1.4).
+2. Retransmitted packets should not have the ECT bit set in order to prevent DoS
+   attack (Section 6.1.5). 
+3. The sender should should reduce the congestion window only once in each 
+   window (Section 6.1.2).
+4. The receiver should ignore the CE bits set in a packet arriving out of
+   window (Section 6.1.5). 
+5. The sender should ignore the ECE bits set in the packet arriving out of
+   window (Section 6.1.2).
+
+Open issues
+^^^^^^^^^^^
+
+The following issues are yet to be addressed:
+
+1. Retransmitted packets should not have the CWR bit set (Section 6.1.5).
+
+2. Despite the congestion window size being 1 MSS, the sender should reduce its
+   congestion window by half when it receives a packet with the ECE bit set. The
+   sender must reset the retransmit timer on receiving the ECN-Echo packet when
+   the congestion window is one.  The sending TCP will then be able to send a
+   new packet only when the retransmit timer expires (Section 6.1.2).
+  
+3. Support for separately handling the enabling of ECN on the incoming and
+   outgoing TCP sessions (e.g. a TCP may perform ECN echoing but not set the
+   ECT codepoints on its outbound data segments).
+
 Validation
 ++++++++++
 
@@ -694,6 +963,8 @@ section below on :ref:`Writing-tcp-tests`.
 * **tcp-bic-test:** Unit tests on the BIC congestion control
 * **tcp-yeah-test:** Unit tests on the YeAH congestion control
 * **tcp-illinois-test:** Unit tests on the Illinois congestion control
+* **tcp-ledbat-test:** Unit tests on the LEDBAT congestion control
+* **tcp-dctcp-test:** Unit tests on the DCTCP congestion control
 * **tcp-option:** Unit tests on TCP options
 * **tcp-pkts-acked-test:** Unit test the number of time that PktsAcked is called
 * **tcp-rto-test:** Unit test behavior after a RTO timeout occurs
@@ -702,6 +973,7 @@ section below on :ref:`Writing-tcp-tests`.
 * **tcp-timestamp:** Unit test on the timestamp option
 * **tcp-wscaling:** Unit test on the window scaling option
 * **tcp-zero-window-test:** Unit test persist behavior for zero window conditions
+* **tcp-ecn-test:** Unit tests on explicit congestion notification
 
 Several tests have dependencies outside of the ``internet`` module, so they
 are located in a system test directory called ``src/test/ns3tcp``.  Three
@@ -719,6 +991,9 @@ disabled if NSC is not enabled in the build.
 Several TCP validation test results can also be found in the
 `wiki page <http://www.nsnam.org/wiki/New_TCP_Socket_Architecture>`_ 
 describing this implementation.
+
+TCP ECN operation is tested in the ARED and RED tests that are documented in the traffic-control 
+module documentation.
 
 Writing a new congestion control algorithm
 ++++++++++++++++++++++++++++++++++++++++++
@@ -752,10 +1027,46 @@ are then asked to lower such value, and to return it.
 PktsAcked is used in case the algorithm needs timing information (such as
 RTT), and it is called each time an ACK is received.
 
+TCP SACK and non-SACK
++++++++++++++++++++++
+To avoid code duplication and the effort of maintaining two different versions
+of the TCP core, namely RFC 6675 (TCP-SACK) and RFC 5681 (TCP congestion
+control), we have merged RFC 6675 in the current code base. If the receiver
+supports the option, the sender bases its retransmissions over the received
+SACK information. However, in the absence of that option, the best it can do is
+to follow the RFC 5681 specification (on Fast Retransmit/Recovery) and
+employing NewReno modifications in case of partial ACKs.
+
+The merge work consisted in implementing an emulation of fake SACK options in
+the sender (when the receiver does not support SACK) following RFC 5681 rules.
+The generation is straightforward: each duplicate ACK (following the definition
+of RFC 5681) carries a new SACK option, that indicates (in increasing order)
+the blocks transmitted after the SND.UNA, not including the block starting from
+SND.UNA itself.
+
+With this emulated SACK information, the sender behaviour is unified in these
+two cases. By carefully generating these SACK block, we are able to employ all
+the algorithms outlined in RFC 6675 (e.g. Update(), NextSeg(), IsLost()) during
+non-SACK transfers. Of course, in the case of RTO expiration, no guess about
+SACK block could be made, and so they are not generated (consequently, the
+implementation will re-send all segments starting from SND.UNA, even the ones
+correctly received). Please note that the generated SACK option (in the case of
+a non-SACK receiver) by the sender never leave the sender node itself; they are
+created locally by the TCP implementation and then consumed.
+
+A similar concept is used in Linux with the function tcp_add_reno_sack. Our
+implementation resides in the TcpTxBuffer class that implements a scoreboard
+through two different lists of segments. TcpSocketBase actively uses the API
+provided by TcpTxBuffer to query the scoreboard; please refer to the Doxygen
+documentation (and to in-code comments) if you want to learn more about this
+implementation.
+
+When SACK attribute is enabled for the receiver socket, the sender will not
+craft any SACK option, relying only on what it receives from the network.
+
 Current limitations
 +++++++++++++++++++
 
-* SACK is not supported
 * TcpCongestionOps interface does not contain every possible Linux operation
 * Fast retransmit / fast recovery are bound with TcpSocketBase, thereby preventing easy simulation of TCP Tahoe
 

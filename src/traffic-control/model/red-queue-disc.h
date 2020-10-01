@@ -61,12 +61,10 @@
 #ifndef RED_QUEUE_DISC_H
 #define RED_QUEUE_DISC_H
 
-#include "ns3/packet.h"
 #include "ns3/queue-disc.h"
 #include "ns3/nstime.h"
 #include "ns3/boolean.h"
 #include "ns3/data-rate.h"
-#include "ns3/nstime.h"
 #include "ns3/random-variable-stream.h"
 
 namespace ns3 {
@@ -101,13 +99,25 @@ public:
   virtual ~RedQueueDisc ();
 
   /**
+   * \brief Used in Feng's Adaptive RED
+   */
+  enum FengStatus
+    {
+      Above,        //!< When m_qAvg > m_maxTh
+      Between,      //!< When m_maxTh < m_qAvg < m_minTh
+      Below,        //!< When m_qAvg < m_minTh
+    };
+
+  /**
    * \brief Stats
    */
   typedef struct
   {   
     uint32_t unforcedDrop;  //!< Early probability drops
-    uint32_t forcedDrop;    //!< Forced drops, qavg > max threshold
+    uint32_t forcedDrop;    //!< Forced drops, m_qAvg > m_maxTh
     uint32_t qLimDrop;      //!< Drops due to queue limits
+    uint32_t unforcedMark;  //!< Early probability marks
+    uint32_t forcedMark;    //!< Forced marks, m_qAvg > m_maxTh
   } Stats;
 
   /** 
@@ -121,20 +131,28 @@ public:
   };
 
   /**
-   * \brief Set the operating mode of this queue.
-   *  Set operating mode
+   * \brief Enumeration of the modes supported in the class.
    *
-   * \param mode The operating mode of this queue.
    */
-  void SetMode (Queue::QueueMode mode);
+  enum QueueDiscMode
+  {
+    QUEUE_DISC_MODE_PACKETS,     /**< Use number of packets for maximum queue disc size */
+    QUEUE_DISC_MODE_BYTES,       /**< Use number of bytes for maximum queue disc size */
+  };
 
   /**
-   * \brief Get the encapsulation mode of this queue.
-   * Get the encapsulation mode of this queue
+   * \brief Set the operating mode of this queue disc.
    *
-   * \returns The encapsulation mode of this queue.
+   * \param mode The operating mode of this queue disc.
    */
-  Queue::QueueMode GetMode (void);
+  void SetMode (QueueDiscMode mode);
+
+  /**
+   * \brief Get the operating mode of this queue disc.
+   *
+   * \returns The operating mode of this queue disc.
+   */
+  QueueDiscMode GetMode (void);
 
   /**
    * \brief Get the current value of the queue in bytes or packets.
@@ -170,6 +188,34 @@ public:
     * \returns The beta value to adapt m_curMaxP.
     */
    double GetAredBeta (void);
+
+   /**
+    * \brief Set the alpha value to adapt m_curMaxP in Feng's Adaptive RED.
+    *
+    * \param a The value of alpha to adapt m_curMaxP in Feng's Adaptive RED.
+    */
+   void SetFengAdaptiveA (double a);
+
+   /**
+    * \brief Get the alpha value to adapt m_curMaxP in Feng's Adaptive RED.
+    *
+    * \returns The alpha value to adapt m_curMaxP in Feng's Adaptive RED.
+    */
+   double GetFengAdaptiveA (void);
+
+   /**
+    * \brief Set the beta value to adapt m_curMaxP in Feng's Adaptive RED.
+    *
+    * \param b The value of beta to adapt m_curMaxP in Feng's Adaptive RED.
+    */
+   void SetFengAdaptiveB (double b);
+
+   /**
+    * \brief Get the beta value to adapt m_curMaxP in Feng's Adaptive RED.
+    *
+    * \returns The beta value to adapt m_curMaxP in Feng's Adaptive RED.
+    */
+   double GetFengAdaptiveB (void);
 
   /**
    * \brief Set the limit of the queue.
@@ -236,9 +282,13 @@ private:
    /**
     * \brief Update m_curMaxP
     * \param newAve new average queue length
-    * \param now Current Time
     */
-  void UpdateMaxP (double newAve, Time now);
+  void UpdateMaxP (double newAve);
+   /**
+    * \brief Update m_curMaxP based on Feng's Adaptive RED
+    * \param newAve new average queue length
+    */
+  void UpdateMaxPFeng (double newAve);
   /**
    * \brief Check if a packet needs to be dropped due to probability mark
    * \param item queue item
@@ -248,43 +298,29 @@ private:
   uint32_t DropEarly (Ptr<QueueDiscItem> item, uint32_t qSize);
   /**
    * \brief Returns a probability using these function parameters for the DropEarly function
-   * \param qAvg Average queue length
-   * \param maxTh Max avg length threshold
-   * \param gentle "gentle" algorithm
-   * \param vA vA
-   * \param vB vB
-   * \param vC vC
-   * \param vD vD
-   * \param maxP max_p
    * \returns Prob. of packet drop before "count"
    */
-  double CalculatePNew (double qAvg, double , bool gentle, double vA,
-                        double vB, double vC, double vD, double maxP);
+  double CalculatePNew (void);
   /**
    * \brief Returns a probability using these function parameters for the DropEarly function
    * \param p Prob. of packet drop before "count"
-   * \param count number of packets since last random number generation
-   * \param countBytes number of bytes since last drop
-   * \param meanPktSize Avg pkt size
-   * \param wait True for waiting between dropped packets
    * \param size packet size
    * \returns Prob. of packet drop
    */
-  double ModifyP (double p, uint32_t count, uint32_t countBytes,
-                  uint32_t meanPktSize, bool wait, uint32_t size);
+  double ModifyP (double p, uint32_t size);
 
   Stats m_stats; //!< RED statistics
 
   // ** Variables supplied by user
-  Queue::QueueMode m_mode;  //!< Mode (Bytes or packets)
+  QueueDiscMode m_mode;     //!< Mode (Bytes or packets)
   uint32_t m_meanPktSize;   //!< Avg pkt size
   uint32_t m_idlePktSize;   //!< Avg pkt size used during idle times
   bool m_isWait;            //!< True for waiting between dropped packets
-  bool m_isGentle;          //!< True to increases dropping prob. slowly when ave queue exceeds maxthresh
+  bool m_isGentle;          //!< True to increase dropping prob. slowly when m_qAvg exceeds m_maxTh
   bool m_isARED;            //!< True to enable Adaptive RED
   bool m_isAdaptMaxP;       //!< True to adapt m_curMaxP
-  double m_minTh;           //!< Min avg length threshold (bytes)
-  double m_maxTh;           //!< Max avg length threshold (bytes), should be >= 2*minTh
+  double m_minTh;           //!< Minimum threshold for m_qAvg (bytes or packets)
+  double m_maxTh;           //!< Maximum threshold for m_qAvg (bytes or packets), should be >= 2 * m_minTh
   uint32_t m_queueLimit;    //!< Queue limit in bytes / packets
   double m_qW;              //!< Queue weight given to cur queue size sample
   double m_lInterm;         //!< The max probability of dropping a packet
@@ -295,12 +331,17 @@ private:
   double m_alpha;           //!< Increment parameter for m_curMaxP in ARED
   double m_beta;            //!< Decrement parameter for m_curMaxP in ARED
   Time m_rtt;               //!< Rtt to be considered while automatically setting m_bottom in ARED
+  bool m_isFengAdaptive;    //!< True to enable Feng's Adaptive RED
+  bool m_isNonlinear;       //!< True to enable Nonlinear RED
+  double m_b;               //!< Increment parameter for m_curMaxP in Feng's Adaptive RED
+  double m_a;               //!< Decrement parameter for m_curMaxP in Feng's Adaptive RED
   bool m_isNs1Compat;       //!< Ns-1 compatibility
   DataRate m_linkBandwidth; //!< Link bandwidth
   Time m_linkDelay;         //!< Link delay
+  bool m_useEcn;            //!< True if ECN is used (packets are marked instead of being dropped)
+  bool m_useHardDrop;       //!< True if packets are always dropped above max threshold
 
   // ** Variables maintained by RED
-  double m_vProb1;          //!< Prob. of packet drop before "count"
   double m_vA;              //!< 1.0 / (m_maxTh - m_minTh)
   double m_vB;              //!< -m_minTh / (m_maxTh - m_minTh)
   double m_vC;              //!< (1.0 - m_curMaxP) / m_maxTh - used in "gentle" mode
@@ -314,10 +355,11 @@ private:
   double m_ptc;             //!< packet time constant in packets/second
   double m_qAvg;            //!< Average queue length
   uint32_t m_count;         //!< Number of packets since last random number generation
+  FengStatus m_fengStatus;  //!< For use in Feng's Adaptive RED
   /**
    * 0 for default RED
-   * 1 experimental (see red-queue.cc)
-   * 2 experimental (see red-queue.cc)
+   * 1 experimental (see red-queue-disc.cc)
+   * 2 experimental (see red-queue-disc.cc)
    * 3 use Idle packet size in the ptc
    */
   uint32_t m_cautious;
